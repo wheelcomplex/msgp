@@ -28,9 +28,56 @@ import (
 // of the number of children in a node
 const maxComplex = 5
 
+// begin recursive search for identities with the
+// given name and replace them with be
+func (f *FileSet) findShim(id string, be *gen.BaseElem) {
+	for name, el := range f.Identities {
+		pushstate(name)
+		switch el := el.(type) {
+		case *gen.Struct:
+			for i := range el.Fields {
+				f.nextShim(&el.Fields[i].FieldElem, id, be)
+			}
+		case *gen.Array:
+			f.nextShim(&el.Els, id, be)
+		case *gen.Slice:
+			f.nextShim(&el.Els, id, be)
+		case *gen.Map:
+			f.nextShim(&el.Value, id, be)
+		case *gen.Ptr:
+			f.nextShim(&el.Value, id, be)
+		}
+		popstate()
+	}
+	// we'll need this at the top level as well
+	f.Identities[id] = be
+}
+
+func (f *FileSet) nextShim(ref *gen.Elem, id string, be *gen.BaseElem) {
+	if (*ref).TypeName() == id {
+		*ref = be
+	} else {
+		switch el := (*ref).(type) {
+		case *gen.Struct:
+			for i := range el.Fields {
+				f.nextShim(&el.Fields[i].FieldElem, id, be)
+			}
+		case *gen.Array:
+			f.nextShim(&el.Els, id, be)
+		case *gen.Slice:
+			f.nextShim(&el.Els, id, be)
+		case *gen.Map:
+			f.nextShim(&el.Value, id, be)
+		case *gen.Ptr:
+			f.nextShim(&el.Value, id, be)
+		}
+	}
+}
+
 // propInline identifies and inlines candidates
 func (f *FileSet) propInline() {
 	for name, el := range f.Identities {
+		pushstate(name)
 		switch el := el.(type) {
 		case *gen.Struct:
 			for i := range el.Fields {
@@ -45,8 +92,14 @@ func (f *FileSet) propInline() {
 		case *gen.Ptr:
 			f.nextInline(&el.Value, name)
 		}
+		popstate()
 	}
 }
+
+const fatalloop = `detected infinite recursion in inlining loop!
+Please file a bug at github.com/tinylib/msgp/issues!
+Thanks!
+`
 
 func (f *FileSet) nextInline(ref *gen.Elem, root string) {
 	switch el := (*ref).(type) {
@@ -56,19 +109,23 @@ func (f *FileSet) nextInline(ref *gen.Elem, root string) {
 		typ := el.TypeName()
 		if el.Value == gen.IDENT && typ != root {
 			if node, ok := f.Identities[typ]; ok && node.Complexity() < maxComplex {
+				infof("inlining %s\n", typ)
 
-				// in order to ensure bottom-up inlining, we need
-				// to make sure this node has already had all its children
-				// inlined.
+				// This should never happen; it will cause
+				// infinite recursion.
+				if node == *ref {
+					panic(fatalloop)
+				}
+
+				// inline bottom-up so as not to miss
+				// other inlining opportunities.
 				f.nextInline(&node, root)
-
-				infof("inlining methods for %s into %s...\n", typ, root)
 				*ref = node.Copy()
 			} else if !ok && !el.Resolved() {
 				// this is the point at which we're sure that
 				// we've got a type that isn't a primitive,
 				// a library builtin, or a processed type
-				warnf(" \u26a0 WARNING: unresolved identifier: %s\n", typ)
+				warnf("unresolved identifier: %s\n", typ)
 			}
 		}
 	case *gen.Struct:
